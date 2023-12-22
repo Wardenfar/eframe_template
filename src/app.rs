@@ -1,20 +1,85 @@
+use std::{
+    future::Future,
+    str::FromStr,
+    sync::{Arc, OnceLock},
+};
+
+use tokio::{runtime::Runtime, sync::oneshot};
+
+use ethers::{
+    core::types::Block,
+    types::{BlockId, BlockNumber, H256},
+};
+use ethers_providers::{Http, Middleware, Provider};
+
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct TemplateApp {
-    // Example stuff:
-    label: String,
+    #[serde(skip)]
+    block: AsyncCell<H256, Block<H256>>,
+    #[serde(skip)]
+    provider: Arc<Provider<Http>>,
+}
 
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
+fn get_runtime() -> Arc<Runtime> {
+    static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| Arc::new(Runtime::new().unwrap()))
+        .clone()
+}
+
+#[derive(Default)]
+pub struct AsyncCell<K, T> {
+    cache: Option<(K, T)>,
+    receiver: Option<(K, oneshot::Receiver<T>)>,
+}
+
+impl<K, T> AsyncCell<K, T>
+where
+    T: Send + 'static,
+    K: Eq,
+{
+    pub fn get_or_update<FB, F>(&mut self, key: K, future_builder: FB) -> Option<&T>
+    where
+        FB: FnOnce() -> F,
+        F: Future<Output = T> + Send + 'static,
+    {
+        if let Some((cached_key, _)) = &self.cache {
+            if cached_key != &key {
+                self.cache = None;
+            }
+        }
+
+        match self.receiver.take() {
+            Some((fetching_key, mut receiver)) => {
+                if let Ok(value) = receiver.try_recv() {
+                    self.cache = Some((fetching_key, value));
+                } else {
+                    self.receiver = Some((fetching_key, receiver));
+                }
+            }
+            None => {
+                let fut = future_builder();
+                let runtime = get_runtime();
+                let (sender, receiver) = oneshot::channel();
+                runtime.spawn(async move { sender.send(fut.await) });
+                self.receiver = Some((key, receiver));
+            }
+        }
+
+        self.cache.as_ref().map(|c| &c.1)
+    }
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
+        let provider = Provider::<Http>::try_from("https://eth.llamarpc.com")
+            .expect("could not instantiate HTTP Provider");
+
         Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
+            block: Default::default(),
+            provider: Arc::new(provider),
         }
     }
 }
@@ -43,43 +108,43 @@ impl eframe::App for TemplateApp {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
-
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            // The top panel is often a good place for a menu bar:
-
             egui::menu::bar(ui, |ui| {
-                // NOTE: no File->Quit on web pages!
-                let is_web = cfg!(target_arch = "wasm32");
-                if !is_web {
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Quit").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.add_space(16.0);
-                }
+                ui.menu_button("File", |ui| {
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.add_space(16.0);
 
                 egui::widgets::global_dark_light_mode_buttons(ui);
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
             ui.heading("eframe template");
 
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(&mut self.label);
+            ui.separator();
+
+            let hash = H256::from_str(
+                "0xf45e2dd95ab165ea215c7c3a5001d7f79f52d5685c18ef54d3d046b773d372f2",
+            )
+            .unwrap();
+
+            let provider = self.provider.clone();
+            let block_opt = self.block.get_or_update(hash, || async move {
+                provider
+                    .get_block(BlockId::Hash(hash))
+                    .await
+                    .unwrap()
+                    .unwrap()
             });
 
-            ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                self.value += 1.0;
+            if let Some(block) = block_opt {
+                ui.label(format!("Trans count : {}", block.transactions.len()));
+            } else {
+                ui.spinner();
             }
-
-            ui.separator();
 
             ui.add(egui::github_link_file!(
                 "https://github.com/emilk/eframe_template/blob/master/",
