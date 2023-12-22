@@ -122,7 +122,7 @@ impl eframe::App for TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("eframe template");
+            ui.heading("Web3 Tools");
 
             ui.separator();
 
@@ -141,20 +141,22 @@ impl eframe::App for TemplateApp {
             });
 
             if let Some(block) = block_opt {
-                ui.label(format!("Trans count : {}", block.transactions.len()));
+                if let Some(block_number) = block.number {
+                    ui.heading(format!("Block (number: {})", block_number));
+                } else {
+                    ui.heading(format!("Block (pending)"));
+                }
+                ui.collapsing(
+                    format!("Transactions ({})", block.transactions.len()),
+                    |ui| {
+                        for trans in block.transactions.iter() {
+                            ui.label(format!("{}", trans));
+                        }
+                    },
+                );
             } else {
                 ui.spinner();
             }
-
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/master/",
-                "Source code."
-            ));
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                powered_by_egui_and_eframe(ui);
-                egui::warn_if_debug_build(ui);
-            });
         });
     }
 }
