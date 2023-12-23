@@ -4,11 +4,13 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use anyhow::Context;
+
 use tokio::{runtime::Runtime, sync::oneshot};
 
 use ethers::{
     core::types::Block,
-    types::{BlockId, BlockNumber, H256},
+    types::{BlockId, H256},
 };
 use ethers_providers::{Http, Middleware, Provider};
 
@@ -17,7 +19,8 @@ use ethers_providers::{Http, Middleware, Provider};
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct TemplateApp {
     #[serde(skip)]
-    block: AsyncCell<H256, Block<H256>>,
+    block: AsyncCell<BlockId, anyhow::Result<Option<Block<H256>>>>,
+    block_id_selector: String,
     #[serde(skip)]
     provider: Arc<Provider<Http>>,
 }
@@ -29,10 +32,18 @@ fn get_runtime() -> Arc<Runtime> {
         .clone()
 }
 
-#[derive(Default)]
 pub struct AsyncCell<K, T> {
     cache: Option<(K, T)>,
     receiver: Option<(K, oneshot::Receiver<T>)>,
+}
+
+impl<K, T> Default for AsyncCell<K, T> {
+    fn default() -> Self {
+        Self {
+            cache: Default::default(),
+            receiver: Default::default(),
+        }
+    }
 }
 
 impl<K, T> AsyncCell<K, T>
@@ -40,7 +51,7 @@ where
     T: Send + 'static,
     K: Eq,
 {
-    pub fn get_or_update<FB, F>(&mut self, key: K, future_builder: FB) -> Option<&T>
+    pub fn get_or_update<FB, F>(&mut self, key: K, future_builder: FB) -> CellState<&T>
     where
         FB: FnOnce() -> F,
         F: Future<Output = T> + Send + 'static,
@@ -68,8 +79,17 @@ where
             }
         }
 
-        self.cache.as_ref().map(|c| &c.1)
+        if let Some((_, cached_value)) = &self.cache {
+            CellState::Value(cached_value)
+        } else {
+            CellState::Running
+        }
     }
+}
+
+pub enum CellState<T> {
+    Running,
+    Value(T),
 }
 
 impl Default for TemplateApp {
@@ -78,6 +98,8 @@ impl Default for TemplateApp {
             .expect("could not instantiate HTTP Provider");
 
         Self {
+            block_id_selector: "0xf45e2dd95ab165ea215c7c3a5001d7f79f52d5685c18ef54d3d046b773d372f2"
+                .to_string(),
             block: Default::default(),
             provider: Arc::new(provider),
         }
@@ -126,51 +148,48 @@ impl eframe::App for TemplateApp {
 
             ui.separator();
 
-            let hash = H256::from_str(
-                "0xf45e2dd95ab165ea215c7c3a5001d7f79f52d5685c18ef54d3d046b773d372f2",
-            )
-            .unwrap();
+            ui.text_edit_singleline(&mut self.block_id_selector);
 
-            let provider = self.provider.clone();
-            let block_opt = self.block.get_or_update(hash, || async move {
-                provider
-                    .get_block(BlockId::Hash(hash))
-                    .await
-                    .unwrap()
-                    .unwrap()
-            });
+            let block_id = BlockId::from_str(&self.block_id_selector);
 
-            if let Some(block) = block_opt {
-                if let Some(block_number) = block.number {
-                    ui.heading(format!("Block (number: {})", block_number));
-                } else {
-                    ui.heading(format!("Block (pending)"));
-                }
-                ui.collapsing(
-                    format!("Transactions ({})", block.transactions.len()),
-                    |ui| {
-                        for trans in block.transactions.iter() {
-                            ui.label(format!("{}", trans));
+            match block_id {
+                Ok(block_id) => {
+                    let provider = self.provider.clone();
+                    let cell_state = self.block.get_or_update(block_id, || async move {
+                        provider.get_block(block_id).await.context("get_block")
+                    });
+
+                    match cell_state {
+                        CellState::Value(Ok(Some(block))) => {
+                            if let Some(block_number) = block.number {
+                                ui.heading(format!("Block (number: {})", block_number));
+                            } else {
+                                ui.heading(format!("Block (pending)"));
+                            }
+                            ui.collapsing(
+                                format!("Transactions ({})", block.transactions.len()),
+                                |ui| {
+                                    for trans in block.transactions.iter() {
+                                        ui.label(format!("{}", trans));
+                                    }
+                                },
+                            );
                         }
-                    },
-                );
-            } else {
-                ui.spinner();
+                        CellState::Value(Ok(None)) => {
+                            ui.label("No block found with this ID");
+                        }
+                        CellState::Value(Err(err)) => {
+                            ui.label(err.to_string());
+                        }
+                        CellState::Running => {
+                            ui.spinner();
+                        }
+                    }
+                }
+                Err(err) => {
+                    ui.label(err.to_string());
+                }
             }
         });
     }
-}
-
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
 }

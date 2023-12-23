@@ -22,6 +22,7 @@ serde = { version = "1", features = ["derive"] }
 ethers = { version = "2.0.11", features = [] }
 ethers-providers = "2.0.11"
 tokio = { version = "1.35.1", features = ["sync", "rt-multi-thread"] }
+anyhow = "1.0.76"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
